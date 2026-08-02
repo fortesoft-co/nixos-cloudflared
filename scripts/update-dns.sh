@@ -18,8 +18,8 @@ ACCOUNT_ID_CONTENT=$(cat "$CF_ACCOUNT_ID")
 ACCOUNT_EMAIL_CONTENT=$(cat "$CF_ACCOUNT_EMAIL")
 ACCOUNT_API_CONTENT=$(cat "$CF_ACCOUNT_API")
 
-# Create a temporary curl config file with auth headers.
-# This prevents the API key from appearing in ps / /proc/<pid>/cmdline.
+# Create a temporary curl config file with auth headers
+# to avoid exposing secrets in process arguments.
 AUTH_CONFIG=$(mktemp)
 chmod 600 "$AUTH_CONFIG"
 trap 'rm -f "$AUTH_CONFIG"' EXIT
@@ -52,7 +52,7 @@ update_cname_record() {
     "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?name=$subdomain&type=CNAME" \
     | $JQ -r '.result[0].id')
 
-  # Build JSON payload with jq to prevent injection
+  # Build JSON payload with jq
   PAYLOAD=$($JQ -n \
     --arg name "$subdomain" \
     --arg content "$cname_target" \

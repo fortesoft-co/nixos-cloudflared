@@ -16,8 +16,8 @@ ACCOUNT_ID_CONTENT=$(cat "$CF_ACCOUNT_ID")
 ACCOUNT_EMAIL_CONTENT=$(cat "$CF_ACCOUNT_EMAIL")
 ACCOUNT_API_CONTENT=$(cat "$CF_ACCOUNT_API")
 
-# Create a temporary curl config file with auth headers.
-# This prevents the API key from appearing in ps / /proc/<pid>/cmdline.
+# Create a temporary curl config file with auth headers
+# to avoid exposing secrets in process arguments.
 AUTH_CONFIG=$(mktemp)
 chmod 600 "$AUTH_CONFIG"
 trap 'rm -f "$AUTH_CONFIG"' EXIT
@@ -88,9 +88,7 @@ fi
 # Create home directory if it doesn't exist
 mkdir -p "$CLOUDFLARED_HOME_DIR"
 
-# Write configuration with restrictive permissions from the start
-# (umask 077 ensures the file is 600 — no race condition where the
-# file is briefly world-readable between write and chmod)
+# Write credentials and token with umask 077 (mode 600).
 (
   umask 077
   $JQ -n \
@@ -99,9 +97,7 @@ mkdir -p "$CLOUDFLARED_HOME_DIR"
     --arg id "$TUNNEL_ID" \
     '{AccountTag: $tag, TunnelSecret: $secret, TunnelID: $id}' \
     > "$CLOUDFLARED_HOME_DIR/.$TUNNEL_NAME.json"
-  # Also write the raw token for LoadCredential — cloudflared's --token
-  # flag expects the JWT from the API's /token endpoint, not the
-  # TunnelSecret field from the credentials JSON.
+  # Raw token file loaded by the tunnel service via LoadCredential.
   printf '%s' "$TUNNEL_SECRET" > "$CLOUDFLARED_HOME_DIR/.$TUNNEL_NAME.token"
 )
 

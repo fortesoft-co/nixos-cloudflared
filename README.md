@@ -1,16 +1,18 @@
 # nixos-cloudflared
 
-A NixOS module that wraps the upstream [`services.cloudflared`](https://github.com/NixOS/nixpkgs/blob/master/nixos/modules/services/networking/cloudflared.nix) module from nixpkgs with:
+A NixOS module for Cloudflare tunnel setup with automated API-based tunnel management, DNS record management, and age-encrypted credentials.
+
+## Features
 
 - **Automated tunnel setup** — creates or fetches an existing Cloudflare tunnel at boot using the Cloudflare API
-- **Age secrets** — Cloudflare account ID, API key, and email are stored in age-encrypted files, decrypted at runtime, never in the Nix store
+- **Age secrets** — Cloudflare account ID, API key, and email are stored as age-encrypted files, decrypted at runtime, never in the Nix store
 - **DNS management** — automatically creates and updates CNAME records for all ingress domains
-- **No dedicated user** — the upstream module uses `DynamicUser` with `LoadCredential`; this module only adds setup and DNS services that run as root with systemd hardening
-- **`--token` authentication** — the Cloudflare API returns a JWT (not a raw `TunnelSecret`), so the upstream module's `credentials-file` approach doesn't work.  This module overrides `ExecStart` to use `--token` with the JWT loaded via `LoadCredential`
+- **Token-based authentication** — authenticates via `--token` with the JWT from the Cloudflare API, loaded through systemd `LoadCredential`
+- **Systemd hardening** — setup and DNS services run with `ProtectSystem`, `NoNewPrivileges`, and other sandboxing options
 
 ## Usage
 
-This module requires the [agenix](https://github.com/ryantm/agenix) module for secret management (Cloudflare account ID, API key, and email are stored as age-encrypted files).
+This module requires the [agenix](https://github.com/ryantm/agenix) module for secret management.
 
 Add both flakes to your inputs:
 
@@ -48,14 +50,12 @@ cfg.cloudflared = {
 };
 ```
 
-Other modules can add ingress entries via the upstream `services.cloudflared` options:
+Other modules can add ingress entries via the `services.cloudflared` options:
 
 ```nix
 services.cloudflared.tunnels."my-tunnel".ingress."app.example.com" =
   "http://localhost:8080";
 ```
-
-The module automatically fetches tunnel credentials via the API, writes them to the credentials file, and updates DNS CNAME records for all ingress domains. The upstream nixpkgs module handles the tunnel service itself using `DynamicUser` and `LoadCredential`.
 
 ## Options
 
@@ -66,7 +66,7 @@ Enable the Cloudflare tunnel module. Requires the [agenix](https://github.com/ry
 Name of the Cloudflare tunnel. Used as the systemd service name suffix and the tunnel identifier in the Cloudflare API.
 
 ### `cfg.cloudflared.homeDir`
-Directory for storing tunnel credentials. Created and owned by root. The credentials JSON file is written here by the setup service and loaded by the upstream cloudflared service via systemd `LoadCredential`. Defaults to `/var/lib/cloudflared`.
+Directory for storing tunnel credentials and token. Created and owned by root. Defaults to `/var/lib/cloudflared`.
 
 ### `cfg.cloudflared.accountIdAgePath`
 Age-encrypted file containing the Cloudflare account ID.
@@ -81,20 +81,10 @@ Age-encrypted file containing the Cloudflare account email.
 
 The module creates two systemd services per tunnel:
 
-1. **`cloudflared-tunnel-setup-<name>`** — runs at boot as root, creates the home directory, fetches or creates the tunnel via the Cloudflare API, and writes the credentials JSON file with restrictive permissions (`umask 077`)
-2. **`cloudflared-update-dns-<name>`** — runs after the tunnel service starts, creates or updates CNAME records for all ingress domains pointing to the tunnel's `cfargotunnel.com` address
+1. **`cloudflared-tunnel-setup-<name>`** — runs at boot, creates the home directory, fetches or creates the tunnel via the Cloudflare API, and writes the token and credentials files with `umask 077`
+2. **`cloudflared-update-dns-<name>`** — runs after the tunnel service starts, creates or updates CNAME records for all ingress domains
 
-The upstream `services.cloudflared` module from nixpkgs handles the tunnel service using `DynamicUser = true` and `LoadCredential`. However, its `ExecStart` uses `credentials-file` in the config, which expects a standard credentials JSON with a raw `TunnelSecret`. Since the Cloudflare API only provides a JWT token (via the `/token` endpoint), this module overrides `ExecStart` to use `--token` with the JWT loaded via `LoadCredential`. The token file is read by systemd as root before dropping to the dynamic user, so the tunnel service can authenticate without ever seeing the raw file.
-
-This module adds a dependency so the tunnel service waits for the setup service to complete before starting.
-
-## Security
-
-- **API keys are not visible in process arguments** — curl auth headers are passed via `--config` with a temporary file (mode 600), not via `-H` command-line flags
-- **Credentials file has no race condition** — written with `umask 077` so it's never world-readable, even briefly
-- **Tunnel name injection prevented** — `jq --arg` is used for all variable interpolation in jq filters and JSON payloads
-- **Setup and DNS services are hardened** — `PrivateTmp`, `ProtectHome`, `ProtectSystem`, `NoNewPrivileges`, and other systemd hardening options
-- **No dedicated service user** — the upstream module's `DynamicUser` creates an ephemeral user for the tunnel service; setup and DNS services run as root with sandboxing
+The tunnel service authenticates via `--token` with the JWT loaded through `LoadCredential`. The token file is read by systemd as root before the dynamic user starts, so the tunnel process never has direct file access.
 
 ## Used by
 
