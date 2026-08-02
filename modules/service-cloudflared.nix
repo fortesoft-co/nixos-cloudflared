@@ -13,7 +13,6 @@ let
   hasAgenix = builtins.hasAttr "age" options;
 
   homeDir = cfg.homeDir;
-  user = cfg.user;
   tunnelName = cfg.tunnelName;
 
   # Decrypted secret paths (derived from age.secrets declarations).
@@ -33,11 +32,11 @@ let
   ping = "${pkgs.iputils}/bin/ping";
 
   createCloudflaredHome = pkgs.replaceVars ../scripts/create-cloudflared-home.sh {
-    inherit homeDir user;
+    inherit homeDir;
   };
 
   fetchOrCreateTunnel = pkgs.replaceVars ../scripts/fetch-or-create-tunnel.sh {
-    inherit tunnelName homeDir user accountIdPath emailPath apiPath curl jq bash ping;
+    inherit tunnelName homeDir accountIdPath emailPath apiPath curl jq bash ping;
   };
 
   cloudflareUpdateDNSScript = pkgs.replaceVars ../scripts/update-dns.sh {
@@ -46,51 +45,6 @@ let
       builtins.attrNames config.services.cloudflared.tunnels.${tunnelName}.ingress
     );
   };
-
-  createExecStartScript =
-    let
-      filterConfig = attrsets.filterAttrsRecursive (
-        _: v:
-        !builtins.elem v [
-          null
-          [ ]
-          { }
-        ]
-      );
-
-      filterIngressSet = filterAttrs (_: v: builtins.typeOf v == "set");
-      filterIngressStr = filterAttrs (_: v: builtins.typeOf v == "string");
-
-      ingressesSet = filterIngressSet config.services.cloudflared.tunnels.${tunnelName}.ingress;
-      ingressesStr = filterIngressStr config.services.cloudflared.tunnels.${tunnelName}.ingress;
-
-      fullConfig = filterConfig {
-        tunnel = tunnelName;
-        "credentials-file" = config.services.cloudflared.tunnels.${tunnelName}.credentialsFile;
-        warp-routing = filterConfig config.services.cloudflared.tunnels.${tunnelName}.warp-routing;
-        originRequest = filterConfig config.services.cloudflared.tunnels.${tunnelName}.originRequest;
-        ingress =
-          (map (
-            key:
-            {
-              hostname = key;
-            }
-            // getAttr key (filterConfig (filterConfig ingressesSet))
-          ) (attrNames ingressesSet))
-          ++ (map (key: {
-            hostname = key;
-            service = getAttr key ingressesStr;
-          }) (attrNames ingressesStr))
-          ++ [ { service = config.services.cloudflared.tunnels.${tunnelName}.default; } ];
-      };
-
-      mkConfigFile = pkgs.writeText "cloudflared.yml" (builtins.toJSON fullConfig);
-    in
-    pkgs.replaceVars ../scripts/create-cloudflare-start-script.sh {
-      inherit tunnelName homeDir user jq;
-      cloudflared_package = config.services.cloudflared.package;
-      config_file = mkConfigFile;
-    };
 in
 {
   imports = [ ./options.nix ];
@@ -120,6 +74,10 @@ in
     }
 
     # ── Tunnel setup service ─────────────────────────────────────────────────
+    # Runs as root (needed to read age secrets and write credentials).
+    # Fetches or creates the tunnel via the Cloudflare API and writes the
+    # credentials JSON file that the upstream tunnel service loads via
+    # systemd LoadCredential.
     {
       systemd.services."cloudflared-tunnel-setup-${tunnelName}" = {
         description = "Create or update Cloudflare tunnel ${tunnelName}";
@@ -129,14 +87,30 @@ in
         script = ''
           ${bash} ${createCloudflaredHome}
           ${bash} ${fetchOrCreateTunnel}
-          ${bash} ${createExecStartScript}
         '';
-        serviceConfig.Type = "oneshot";
-        serviceConfig.RemainAfterExit = true;
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          # Hardening
+          PrivateTmp = true;
+          ProtectHome = true;
+          ProtectSystem = "strict";
+          ReadWritePaths = [ homeDir ];
+          NoNewPrivileges = true;
+          ProtectKernelLogs = true;
+          ProtectKernelModules = true;
+          ProtectKernelTunables = true;
+          ProtectControlGroups = true;
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          SystemCallArchitectures = "native";
+        };
       };
     }
 
     # ── DNS update service ───────────────────────────────────────────────────
+    # Runs as root (needed to read age secrets).  Creates or updates CNAME
+    # records for all ingress domains.
     {
       systemd.services."cloudflared-update-dns-${tunnelName}" = {
         description = "Update DNS records for cloudflare tunnel ${tunnelName} domains";
@@ -149,44 +123,40 @@ in
         script = ''
           ${bash} ${cloudflareUpdateDNSScript}
         '';
-        serviceConfig.Type = "oneshot";
-        serviceConfig.RemainAfterExit = true;
-      };
-    }
-
-    # ── Tunnel service ────────────────────────────────────────────────────────
-    {
-      systemd.services."cloudflared-tunnel-${tunnelName}" = {
-        after = [
-          "network-online.target"
-          "cloudflared-tunnel-setup-${tunnelName}.service"
-        ];
-        requires = [ "cloudflared-tunnel-setup-${tunnelName}.service" ];
         serviceConfig = {
-          Restart = "on-failure";
-          ExecStart = mkForce "${homeDir}/${tunnelName}_tunnel.sh";
-          User = user;
-          Group = user;
-          WorkingDirectory = homeDir;
-          StandardOutput = "journal";
-          StandardError = "journal";
-          Environment = "HOME=${homeDir}";
+          Type = "oneshot";
+          RemainAfterExit = true;
+          # Hardening
+          PrivateTmp = true;
+          ProtectHome = true;
+          ProtectSystem = "strict";
+          NoNewPrivileges = true;
+          ProtectKernelLogs = true;
+          ProtectKernelModules = true;
+          ProtectKernelTunables = true;
+          ProtectControlGroups = true;
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          SystemCallArchitectures = "native";
         };
       };
     }
 
-    # ── User and group ───────────────────────────────────────────────────────
+    # ── Tunnel service dependency ─────────────────────────────────────────────
+    # The upstream nixpkgs module creates the tunnel service with DynamicUser
+    # and LoadCredential.  We just need to add a dependency on our setup service
+    # so the credentials file exists before the tunnel starts.
     {
-      users.users.${user} = {
-        isSystemUser = true;
-        group = user;
-        home = homeDir;
+      systemd.services."cloudflared-tunnel-${tunnelName}" = {
+        after = [ "cloudflared-tunnel-setup-${tunnelName}.service" ];
+        requires = [ "cloudflared-tunnel-setup-${tunnelName}.service" ];
       };
-
-      users.groups.${user} = { };
     }
 
     # ── Upstream cloudflared service ──────────────────────────────────────────
+    # The upstream module handles the tunnel service with DynamicUser=true and
+    # LoadCredential.  We just set the credentials file path — the upstream
+    # module loads it and makes it available to the dynamic user.
     {
       services.cloudflared = {
         enable = true;

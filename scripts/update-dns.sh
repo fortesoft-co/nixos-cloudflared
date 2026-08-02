@@ -18,16 +18,25 @@ ACCOUNT_ID_CONTENT=$(cat "$CF_ACCOUNT_ID")
 ACCOUNT_EMAIL_CONTENT=$(cat "$CF_ACCOUNT_EMAIL")
 ACCOUNT_API_CONTENT=$(cat "$CF_ACCOUNT_API")
 
-get_domain() {  
+# Create a temporary curl config file with auth headers.
+# This prevents the API key from appearing in ps / /proc/<pid>/cmdline.
+AUTH_CONFIG=$(mktemp)
+chmod 600 "$AUTH_CONFIG"
+trap 'rm -f "$AUTH_CONFIG"' EXIT
+{
+  printf 'header = "X-Auth-Email: %s"\n' "$ACCOUNT_EMAIL_CONTENT"
+  printf 'header = "X-Auth-Key: %s"\n' "$ACCOUNT_API_CONTENT"
+} > "$AUTH_CONFIG"
+
+get_domain() {
   domain=$1
   echo "$domain" | $GAWK -F. '{n = NF; if ($(n-1) == "co" || $(n-1) == "com") {print $(n-2) "." $(n-1) "." $n} else {print $(n-1) "." $n}}'
 }
 
 get_zone_id() {
   domain=$1
-  zone_id=$($CURL -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$domain" \
-    -H "X-Auth-Email: $ACCOUNT_EMAIL_CONTENT" \
-    -H "X-Auth-Key: $ACCOUNT_API_CONTENT" \
+  zone_id=$($CURL -s --config "$AUTH_CONFIG" -X GET \
+    "https://api.cloudflare.com/client/v4/zones?name=$domain" \
     | $JQ -r '.result[0].id')
   echo $zone_id
 }
@@ -39,28 +48,29 @@ update_cname_record() {
   echo "Setting CNAME record of $subdomain to $cname_target"
 
   # Check if the DNS record exists
-  record_id=$($CURL -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?name=$subdomain&type=CNAME" \
-    -H "X-Auth-Email: $ACCOUNT_EMAIL_CONTENT" \
-    -H "X-Auth-Key: $ACCOUNT_API_CONTENT" \
+  record_id=$($CURL -s --config "$AUTH_CONFIG" -X GET \
+    "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?name=$subdomain&type=CNAME" \
     | $JQ -r '.result[0].id')
+
+  # Build JSON payload with jq to prevent injection
+  PAYLOAD=$($JQ -n \
+    --arg name "$subdomain" \
+    --arg content "$cname_target" \
+    '{type: "CNAME", name: $name, content: $content, ttl: 120, proxied: true}')
 
   if [ -n "$record_id" ] && [ "$record_id" != "null" ]; then
     # Update existing CNAME record
-    $CURL -s -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
-      -H "X-Auth-Email: $ACCOUNT_EMAIL_CONTENT" \
-      -H "X-Auth-Key: $ACCOUNT_API_CONTENT" \
+    $CURL -s --config "$AUTH_CONFIG" -X PUT \
+      "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
       -H "Content-Type: application/json" \
-      --data '{"type":"CNAME","name":"'"$subdomain"'","content":"'"$cname_target"'","ttl":120,"proxied":true}'
-
+      --data "$PAYLOAD"
     echo "Updated CNAME for $subdomain"
   else
     # Create new CNAME record
-    $CURL -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records" \
-      -H "X-Auth-Email: $ACCOUNT_EMAIL_CONTENT" \
-      -H "X-Auth-Key: $ACCOUNT_API_CONTENT" \
+    $CURL -s --config "$AUTH_CONFIG" -X POST \
+      "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records" \
       -H "Content-Type: application/json" \
-      --data '{"type":"CNAME","name":"'"$subdomain"'","content":"'"$cname_target"'","ttl":120,"proxied":true}'
-
+      --data "$PAYLOAD"
     echo "Created CNAME for $subdomain"
   fi
 }

@@ -5,7 +5,7 @@ A NixOS module that wraps the upstream [`services.cloudflared`](https://github.c
 - **Automated tunnel setup** — creates or fetches an existing Cloudflare tunnel at boot using the Cloudflare API
 - **Age secrets** — Cloudflare account ID, API key, and email are stored in age-encrypted files, decrypted at runtime, never in the Nix store
 - **DNS management** — automatically creates and updates CNAME records for all ingress domains
-- **Per-tunnel configuration** — supports multiple tunnels with independent credentials and ingress rules
+- **No dedicated user** — the upstream module uses `DynamicUser` with `LoadCredential`; this module only adds setup and DNS services that run as root with systemd hardening
 
 ## Usage
 
@@ -54,7 +54,7 @@ services.cloudflared.tunnels."my-tunnel".ingress."app.example.com" =
   "http://localhost:8080";
 ```
 
-The module automatically generates the tunnel config, creates the start script, fetches tunnel credentials via the API, and updates DNS CNAME records for all ingress domains.
+The module automatically fetches tunnel credentials via the API, writes them to the credentials file, and updates DNS CNAME records for all ingress domains. The upstream nixpkgs module handles the tunnel service itself using `DynamicUser` and `LoadCredential`.
 
 ## Options
 
@@ -65,10 +65,7 @@ Enable the Cloudflare tunnel module. Requires the [agenix](https://github.com/ry
 Name of the Cloudflare tunnel. Used as the systemd service name suffix and the tunnel identifier in the Cloudflare API.
 
 ### `cfg.cloudflared.homeDir`
-Home directory for the cloudflared user. Stores tunnel credentials and the generated tunnel start script. Defaults to `/var/lib/cloudflared`.
-
-### `cfg.cloudflared.user`
-System user for the cloudflared service. Defaults to `"cloudflared"`.
+Directory for storing tunnel credentials. Created and owned by root. The credentials JSON file is written here by the setup service and loaded by the upstream cloudflared service via systemd `LoadCredential`. Defaults to `/var/lib/cloudflared`.
 
 ### `cfg.cloudflared.accountIdAgePath`
 Age-encrypted file containing the Cloudflare account ID.
@@ -81,13 +78,20 @@ Age-encrypted file containing the Cloudflare account email.
 
 ## How it works
 
-The module creates three systemd services per tunnel:
+The module creates two systemd services per tunnel:
 
-1. **`cloudflared-tunnel-setup-<name>`** — runs at boot, creates the home directory, fetches or creates the tunnel via the Cloudflare API, and generates the tunnel start script
-2. **`cloudflared-update-dns-<name>`** — runs after setup, creates or updates CNAME records for all ingress domains pointing to the tunnel's `cfargotunnel.com` address
-3. **`cloudflared-tunnel-<name>`** — runs the tunnel itself, starts after setup completes
+1. **`cloudflared-tunnel-setup-<name>`** — runs at boot as root, creates the home directory, fetches or creates the tunnel via the Cloudflare API, and writes the credentials JSON file with restrictive permissions (`umask 077`)
+2. **`cloudflared-update-dns-<name>`** — runs after the tunnel service starts, creates or updates CNAME records for all ingress domains pointing to the tunnel's `cfargotunnel.com` address
 
-The upstream `services.cloudflared` module from nixpkgs is enabled with the tunnel credentials file pointing to the API-fetched credentials.
+The upstream `services.cloudflared` module from nixpkgs handles the tunnel service itself using `DynamicUser = true` and `LoadCredential`. This module just adds a dependency so the tunnel service waits for the setup service to complete.
+
+## Security
+
+- **API keys are not visible in process arguments** — curl auth headers are passed via `--config` with a temporary file (mode 600), not via `-H` command-line flags
+- **Credentials file has no race condition** — written with `umask 077` so it's never world-readable, even briefly
+- **Tunnel name injection prevented** — `jq --arg` is used for all variable interpolation in jq filters and JSON payloads
+- **Setup and DNS services are hardened** — `PrivateTmp`, `ProtectHome`, `ProtectSystem`, `NoNewPrivileges`, and other systemd hardening options
+- **No dedicated service user** — the upstream module's `DynamicUser` creates an ephemeral user for the tunnel service; setup and DNS services run as root with sandboxing
 
 ## Used by
 

@@ -12,8 +12,9 @@ with lib;
       type = types.path;
       default = "/var/lib/cloudflared";
       description = ''
-        Home directory for the cloudflared user.  Stores tunnel credentials
-        and the generated tunnel start script.
+        Directory for storing tunnel credentials.  Created and owned by root.
+        The credentials JSON file is written here by the setup service and
+        loaded by the upstream cloudflared service via systemd LoadCredential.
       '';
     };
 
@@ -23,12 +24,6 @@ with lib;
         Name of the Cloudflare tunnel.  Used as the systemd service name suffix
         and the tunnel identifier in the Cloudflare API.
       '';
-    };
-
-    user = mkOption {
-      type = types.str;
-      default = "cloudflared";
-      description = "System user for the cloudflared service.";
     };
 
     accountIdAgePath = mkOption {
