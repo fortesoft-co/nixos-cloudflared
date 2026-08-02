@@ -6,6 +6,7 @@ A NixOS module that wraps the upstream [`services.cloudflared`](https://github.c
 - **Age secrets** — Cloudflare account ID, API key, and email are stored in age-encrypted files, decrypted at runtime, never in the Nix store
 - **DNS management** — automatically creates and updates CNAME records for all ingress domains
 - **No dedicated user** — the upstream module uses `DynamicUser` with `LoadCredential`; this module only adds setup and DNS services that run as root with systemd hardening
+- **`--token` authentication** — the Cloudflare API returns a JWT (not a raw `TunnelSecret`), so the upstream module's `credentials-file` approach doesn't work.  This module overrides `ExecStart` to use `--token` with the JWT loaded via `LoadCredential`
 
 ## Usage
 
@@ -83,7 +84,9 @@ The module creates two systemd services per tunnel:
 1. **`cloudflared-tunnel-setup-<name>`** — runs at boot as root, creates the home directory, fetches or creates the tunnel via the Cloudflare API, and writes the credentials JSON file with restrictive permissions (`umask 077`)
 2. **`cloudflared-update-dns-<name>`** — runs after the tunnel service starts, creates or updates CNAME records for all ingress domains pointing to the tunnel's `cfargotunnel.com` address
 
-The upstream `services.cloudflared` module from nixpkgs handles the tunnel service itself using `DynamicUser = true` and `LoadCredential`. This module just adds a dependency so the tunnel service waits for the setup service to complete.
+The upstream `services.cloudflared` module from nixpkgs handles the tunnel service using `DynamicUser = true` and `LoadCredential`. However, its `ExecStart` uses `credentials-file` in the config, which expects a standard credentials JSON with a raw `TunnelSecret`. Since the Cloudflare API only provides a JWT token (via the `/token` endpoint), this module overrides `ExecStart` to use `--token` with the JWT loaded via `LoadCredential`. The token file is read by systemd as root before dropping to the dynamic user, so the tunnel service can authenticate without ever seeing the raw file.
+
+This module adds a dependency so the tunnel service waits for the setup service to complete before starting.
 
 ## Security
 

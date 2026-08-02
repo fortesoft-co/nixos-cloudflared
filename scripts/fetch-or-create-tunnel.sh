@@ -99,6 +99,10 @@ mkdir -p "$CLOUDFLARED_HOME_DIR"
     --arg id "$TUNNEL_ID" \
     '{AccountTag: $tag, TunnelSecret: $secret, TunnelID: $id}' \
     > "$CLOUDFLARED_HOME_DIR/.$TUNNEL_NAME.json"
+  # Also write the raw token for LoadCredential — cloudflared's --token
+  # flag expects the JWT from the API's /token endpoint, not the
+  # TunnelSecret field from the credentials JSON.
+  printf '%s' "$TUNNEL_SECRET" > "$CLOUDFLARED_HOME_DIR/.$TUNNEL_NAME.token"
 )
 
 echo "Tunnel configuration successfully created"
