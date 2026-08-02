@@ -79,12 +79,11 @@ Age-encrypted file containing the Cloudflare account email.
 
 ## How it works
 
-The module creates two systemd services per tunnel:
+The module creates three systemd services per tunnel:
 
 1. **`cloudflared-tunnel-setup-<name>`** — runs at boot, creates the home directory, fetches or creates the tunnel via the Cloudflare API, and writes the token and credentials files with `umask 077`
-2. **`cloudflared-update-dns-<name>`** — runs after the tunnel service starts, creates or updates CNAME records for all ingress domains
-
-The tunnel service authenticates via `--token` with the JWT loaded through `LoadCredential`. The token file is read by systemd as root before the dynamic user starts, so the tunnel process never has direct file access.
+2. **`cloudflared-tunnel-<name>`** — the tunnel daemon itself, runs with `DynamicUser` and authenticates via `--token` with the JWT loaded through `LoadCredential`
+3. **`cloudflared-update-dns-<name>`** — runs after the tunnel service starts, creates or updates CNAME records for all ingress domains
 
 ## Used by
 
