@@ -9,13 +9,16 @@ A NixOS module that wraps the upstream [`services.cloudflared`](https://github.c
 
 ## Usage
 
-Add to your flake inputs:
+This module requires the [agenix](https://github.com/ryantm/agenix) module for secret management (Cloudflare account ID, API key, and email are stored as age-encrypted files).
+
+Add both flakes to your inputs:
 
 ```nix
+inputs.agenix.url = "github:ryantm/agenix";
 inputs.nixos-cloudflared.url = "github:fortesoft-co/nixos-cloudflared";
 ```
 
-Import the module:
+Import both modules:
 
 ```nix
 {
@@ -23,7 +26,10 @@ Import the module:
   ...
 }:
 {
-  imports = [ inputs.nixos-cloudflared.nixosModules.default ];
+  imports = [
+    inputs.agenix.nixosModules.default
+    inputs.nixos-cloudflared.nixosModules.default
+  ];
 }
 ```
 
