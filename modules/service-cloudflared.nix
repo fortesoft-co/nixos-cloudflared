@@ -192,7 +192,7 @@ in
         requires = [ "cloudflared-tunnel-setup-${tunnelName}.service" ];
         serviceConfig = {
           LoadCredential = mkForce [ "tunnel-token:${homeDir}/.${tunnelName}.token" ];
-          ExecStart = mkForce startScript;
+          ExecStart = mkForce "${bash} ${startScript}";
         };
       };
     }
