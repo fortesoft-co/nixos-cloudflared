@@ -11,4 +11,4 @@ exec "$CLOUDFLARED_PACKAGE/bin/cloudflared" tunnel \
   --config="@config_file@" \
   --no-autoupdate \
   run \
-  --token "$(cat "$TOKEN_FILE")"
+  --token-file "$TOKEN_FILE"
