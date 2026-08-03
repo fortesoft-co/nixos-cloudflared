@@ -29,7 +29,7 @@ let
   ping = "${pkgs.iputils}/bin/ping";
 
   createCloudflaredHome = pkgs.replaceVars ../scripts/create-cloudflared-home.sh {
-    inherit homeDir;
+    inherit homeDir bash;
   };
 
   fetchOrCreateTunnel = pkgs.replaceVars ../scripts/fetch-or-create-tunnel.sh {
@@ -87,6 +87,7 @@ let
   # Start script that reads the tunnel token from systemd's credentials
   # directory and passes it via --token.
   startScript = pkgs.replaceVars ../scripts/start-tunnel.sh {
+    inherit bash;
     cloudflared_package = config.services.cloudflared.package;
     config_file = tunnelConfig;
   };

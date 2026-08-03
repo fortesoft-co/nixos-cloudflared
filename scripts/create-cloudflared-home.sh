@@ -1,3 +1,4 @@
+#!@bash@
 set -euo pipefail
 
 # Parameters substituted by Nix
