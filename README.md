@@ -1,90 +1,144 @@
 # nixos-cloudflared
 
-A NixOS module for Cloudflare tunnel setup with automated API-based tunnel management, DNS record management, and age-encrypted credentials.
+A NixOS module for Cloudflare tunnels that sets itself up. Give it API
+credentials and a list of hostnames. At boot it finds or creates the tunnel,
+starts the daemon with the tunnel's token, and points a proxied DNS record at
+the tunnel for every hostname. You never open the Cloudflare dashboard, open an
+inbound port or forward a router port.
 
-## Features
+## What it does
 
-- **Automated tunnel setup** — creates or fetches an existing Cloudflare tunnel at boot using the Cloudflare API
-- **Age secrets** — Cloudflare account ID, API key, and email are stored as age-encrypted files, decrypted at runtime, never in the Nix store
-- **DNS management** — automatically creates and updates CNAME records for all ingress domains
-- **Token-based authentication** — authenticates via `--token` with the JWT from the Cloudflare API, loaded through systemd `LoadCredential`
-- **Systemd hardening** — setup and DNS services run with `ProtectSystem`, `NoNewPrivileges`, and other sandboxing options
+Three units per tunnel:
 
-## Usage
+1. **`cloudflared-tunnel-setup-<name>`** finds the tunnel named `<name>` in your
+   account through the Cloudflare API, or creates it. It then stores the
+   tunnel's token in `stateDir`, readable by root only.
+2. **`cloudflared-tunnel-<name>`** is nixpkgs' cloudflared daemon. It runs as a
+   throwaway user and receives the token as a systemd credential.
+3. **`cloudflared-update-dns-<name>`** keeps a proxied CNAME
+   (`<hostname>` → `<tunnel-id>.cfargotunnel.com`) for every ingress hostname.
+   For each one it looks up the zone that actually holds it, so
+   `app.example.co.uk` and delegated sub-zones land in the right place.
+   Existing CNAMEs with those names are updated in place.
 
-This module requires the [agenix](https://github.com/ryantm/agenix) module for secret management.
-
-Add both flakes to your inputs:
-
-```nix
-inputs.agenix.url = "github:ryantm/agenix";
-inputs.nixos-cloudflared.url = "github:fortesoft-co/nixos-cloudflared";
-```
-
-Import both modules:
-
-```nix
-{
-  inputs,
-  ...
-}:
-{
-  imports = [
-    inputs.agenix.nixosModules.default
-    inputs.nixos-cloudflared.nixosModules.default
-  ];
-}
-```
-
-Configure:
+Ingress uses nixpkgs' own options, so any module can add a hostname:
 
 ```nix
-cfg.cloudflared = {
-  enable = true;
-  tunnelName = "my-tunnel";
-  homeDir = "/var/lib/cloudflared";
-
-  accountIdAgePath = ./secrets/cf_account_id.age;
-  apiAgePath = ./secrets/cf_account_api.age;
-  emailAgePath = ./secrets/cf_account_email.age;
+services.cloudflared.tunnels.${config.services.cloudflared-tunnel.name}.ingress = {
+  "app.example.com" = "http://127.0.0.1:8080";
+  "auth.example.com" = {
+    service = "https://127.0.0.1:443";
+    originRequest.originServerName = "auth.example.com";
+  };
 };
 ```
 
-Other modules can add ingress entries via the `services.cloudflared` options:
+The tunnel name defaults to the host name. Modules that write to
+`services.cloudflared.tunnels.${config.networking.hostName}` work without
+knowing about this module.
+
+## Secrets
+
+Credentials are runtime paths to root-only files, from agenix, sops-nix or
+anywhere else. The module never asks for a particular secrets tool:
+
+- **Nothing in the Nix store.** The options reject paths inside it.
+- **Nothing on a command line or in the environment.** Each API unit gets the
+  credentials as systemd credentials (`LoadCredential=`), and the scripts hand
+  them to curl through a config file in the unit's private `/tmp`.
+- **Only the units that call the API can read them.** The daemon only ever sees
+  the tunnel token.
+
+## Usage
 
 ```nix
-services.cloudflared.tunnels."my-tunnel".ingress."app.example.com" =
-  "http://localhost:8080";
+inputs.nixos-cloudflared.url = "github:fortesoft-co/nixos-cloudflared";
 ```
+
+```nix
+{ config, nixos-cloudflared, ... }:
+{
+  imports = [ nixos-cloudflared.nixosModules.default ];
+
+  services.cloudflared-tunnel = {
+    enable = true;
+    accountIdFile = "/run/secrets/cloudflare-account-id";
+    apiTokenFile = "/run/secrets/cloudflare-api-token";
+  };
+}
+```
+
+### Credentials
+
+- **Account ID:** on your account's overview page in the Cloudflare dashboard.
+- **An API token (recommended).** Create one under *My Profile → API Tokens*
+  with these permissions:
+  - Account › Cloudflare Tunnel › Edit
+  - Zone › DNS › Edit
+  - Zone › Zone › Read
+
+  Limit the zone permissions to the zones your hostnames are in.
+- **Or the global API key** (`apiKeyFile`) together with the account email
+  (`emailFile`). It works, but the global key can do anything on the account.
 
 ## Options
 
-### `cfg.cloudflared.enable`
-Enable the Cloudflare tunnel module. Requires the [agenix](https://github.com/ryantm/agenix) module to be imported.
+All options live under `services.cloudflared-tunnel`.
 
-### `cfg.cloudflared.tunnelName`
-Name of the Cloudflare tunnel. Used as the systemd service name suffix and the tunnel identifier in the Cloudflare API.
+| Option | Default | |
+|---|---|---|
+| `enable` | `false` | Turn the module on. |
+| `name` | `networking.hostName` | Tunnel name in Cloudflare, and its key in `services.cloudflared.tunnels`. An existing tunnel with this name is reused. |
+| `stateDir` | `/var/lib/cloudflared` | Root-only directory for the tunnel token. |
+| `accountIdFile` | | File holding the account ID. |
+| `apiTokenFile` | `null` | File holding a scoped API token. |
+| `apiKeyFile`, `emailFile` | `null` | Global API key and account email, instead of a token. |
+| `dns.enable` | `true` | Manage the CNAME records. |
+| `apiUrl` | Cloudflare's | API base URL, for tests or a proxy. |
 
-### `cfg.cloudflared.homeDir`
-Directory for storing tunnel credentials and token. Created and owned by root. Defaults to `/var/lib/cloudflared`.
+## Migrating from `cfg.cloudflared`
 
-### `cfg.cloudflared.accountIdAgePath`
-Age-encrypted file containing the Cloudflare account ID.
+The options moved to `services.cloudflared-tunnel`, and the `*AgePath` options
+are gone. Declare the secrets yourself and pass their runtime paths:
 
-### `cfg.cloudflared.apiAgePath`
-Age-encrypted file containing the Cloudflare API key.
+```nix
+age.secrets.cf-account-id.file = ./secrets/cf_account_id.age;
+age.secrets.cf-api-key.file = ./secrets/cf_account_api.age;
+age.secrets.cf-email.file = ./secrets/cf_account_email.age;
 
-### `cfg.cloudflared.emailAgePath`
-Age-encrypted file containing the Cloudflare account email.
+services.cloudflared-tunnel = {
+  enable = true;
+  name = "my-tunnel";               # was tunnelName; defaults to the host name
+  stateDir = "/var/lib/cloudflared"; # was homeDir
+  accountIdFile = config.age.secrets.cf-account-id.path;
+  apiKeyFile = config.age.secrets.cf-api-key.path;
+  emailFile = config.age.secrets.cf-email.path;
+};
+```
 
-## How it works
+Setting any old `cfg.cloudflared` option fails evaluation with these
+instructions.
 
-The module creates three systemd services per tunnel:
+## Tests
 
-1. **`cloudflared-tunnel-setup-<name>`** — runs at boot, creates the home directory, fetches or creates the tunnel via the Cloudflare API, and writes the token and credentials files with `umask 077`
-2. **`cloudflared-tunnel-<name>`** — the tunnel daemon itself, runs with `DynamicUser` and authenticates via `--token` with the JWT loaded through `LoadCredential`
-3. **`cloudflared-update-dns-<name>`** — runs after the tunnel service starts, creates or updates CNAME records for all ingress domains
+```sh
+nix flake check
+```
+
+`tunnel` boots a VM against a stub of the Cloudflare API and checks that:
+
+- the tunnel is created once and reused;
+- its token is stored root-only;
+- every hostname gets a proxied CNAME in its own zone, including a
+  multi-label suffix;
+- the API token appears only as a request header, never in the process table
+  or the journal.
 
 ## Used by
 
-- [nixos-litellm](https://github.com/fortesoft-co/nixos-litellm) — uses this module for the `domain` (cloudflared ingress) feature
+- [nixos-swag](https://github.com/fortesoft-co/nixos-swag): the public
+  Authentik login through a tunnel.
+
+## License
+
+[AGPL-3.0](LICENSE).

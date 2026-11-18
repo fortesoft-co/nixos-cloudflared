@@ -1,51 +1,53 @@
+# Cloudflare tunnel, set up through the Cloudflare API.
+#
+# Three units per tunnel:
+#   cloudflared-tunnel-setup-<name>  finds or creates the tunnel and stores its
+#                                    token (root-only, in stateDir)
+#   cloudflared-tunnel-<name>        the daemon (nixpkgs' services.cloudflared),
+#                                    authenticating with that token
+#   cloudflared-update-dns-<name>    a proxied CNAME per ingress hostname
+#
+# Ingress entries come from nixpkgs' options: any module can add
+# services.cloudflared.tunnels.<name>.ingress."<hostname>".
+#
+# Secrets: the API credentials reach the two API units as systemd
+# credentials (LoadCredential), so no other user or service can read them,
+# and the scripts pass them to curl through a config file in the unit's
+# private /tmp — never on a command line or in the environment.
 {
   config,
   lib,
   pkgs,
-  options,
   ...
 }:
 with lib;
 let
-  cfg = config.cfg.cloudflared;
+  cfg = config.services.cloudflared-tunnel;
+  inherit (cfg) name stateDir;
+  tunnel = config.services.cloudflared.tunnels.${name};
 
-  hasAgenix = builtins.hasAttr "age" options;
-
-  homeDir = cfg.homeDir;
-  tunnelName = cfg.tunnelName;
-
-  accountIdPath = config.age.secrets.cf_account_id.path;
-  apiPath = config.age.secrets.cf_account_api.path;
-  emailPath = config.age.secrets.cf_account_email.path;
-
-  accountIdAgePath = cfg.accountIdAgePath;
-  apiAgePath = cfg.apiAgePath;
-  emailAgePath = cfg.emailAgePath;
-
-  curl = "${pkgs.curl}/bin/curl";
-  jq = "${pkgs.jq}/bin/jq";
-  gawk = "${pkgs.gawk}/bin/awk";
   bash = "${pkgs.bash}/bin/bash";
-  ping = "${pkgs.iputils}/bin/ping";
+  jq = "${pkgs.jq}/bin/jq";
 
-  createCloudflaredHome = pkgs.replaceVars ../scripts/create-cloudflared-home.sh {
-    inherit homeDir bash;
+  cfApi = pkgs.replaceVars ../scripts/cf-api.sh {
+    curl = "${pkgs.curl}/bin/curl";
+    inherit (cfg) apiUrl;
   };
 
-  fetchOrCreateTunnel = pkgs.replaceVars ../scripts/fetch-or-create-tunnel.sh {
-    inherit tunnelName homeDir accountIdPath emailPath apiPath curl jq bash ping;
+  setupScript = pkgs.replaceVars ../scripts/fetch-or-create-tunnel.sh {
+    inherit bash jq stateDir cfApi;
+    tunnelName = name;
   };
 
-  cloudflareUpdateDNSScript = pkgs.replaceVars ../scripts/update-dns.sh {
-    inherit tunnelName homeDir accountIdPath emailPath apiPath curl jq gawk bash ping;
-    ingress_domains = concatStringsSep " " (
-      builtins.attrNames config.services.cloudflared.tunnels.${tunnelName}.ingress
-    );
+  dnsScript = pkgs.replaceVars ../scripts/update-dns.sh {
+    inherit bash jq stateDir cfApi;
+    tunnelName = name;
+    ingressHostnames = concatStringsSep " " (attrNames tunnel.ingress);
   };
 
-  # Generate the cloudflared config file from the upstream tunnel options.
-  # Authentication is handled via --token (see startScript), not
-  # credentials-file, because the Cloudflare API provides a JWT.
+  # The cloudflared config, generated from nixpkgs' tunnel options. The
+  # daemon authenticates with --token-file (see start-tunnel.sh), not a
+  # credentials file.
   tunnelConfig =
     let
       filterConfig = attrsets.filterAttrsRecursive (
@@ -56,158 +58,137 @@ let
           { }
         ]
       );
-
-      filterIngressSet = filterAttrs (_: v: builtins.typeOf v == "set");
-      filterIngressStr = filterAttrs (_: v: builtins.typeOf v == "string");
-
-      ingressesSet = filterIngressSet config.services.cloudflared.tunnels.${tunnelName}.ingress;
-      ingressesStr = filterIngressStr config.services.cloudflared.tunnels.${tunnelName}.ingress;
-
-      fullConfig = filterConfig {
-        tunnel = tunnelName;
-        warp-routing = filterConfig config.services.cloudflared.tunnels.${tunnelName}.warp-routing;
-        originRequest = filterConfig config.services.cloudflared.tunnels.${tunnelName}.originRequest;
-        ingress =
-          (map (
-            key:
-            {
-              hostname = key;
-            }
-            // getAttr key (filterConfig (filterConfig ingressesSet))
-          ) (attrNames ingressesSet))
-          ++ (map (key: {
-            hostname = key;
-            service = getAttr key ingressesStr;
-          }) (attrNames ingressesStr))
-          ++ [ { service = config.services.cloudflared.tunnels.${tunnelName}.default; } ];
-      };
+      ingressSets = filterAttrs (_: v: builtins.typeOf v == "set") tunnel.ingress;
+      ingressStrs = filterAttrs (_: v: builtins.typeOf v == "string") tunnel.ingress;
     in
-    pkgs.writeText "cloudflared-${tunnelName}.yml" (builtins.toJSON fullConfig);
+    pkgs.writeText "cloudflared-${name}.yml" (
+      builtins.toJSON (filterConfig {
+        tunnel = name;
+        warp-routing = filterConfig tunnel.warp-routing;
+        originRequest = filterConfig tunnel.originRequest;
+        ingress =
+          mapAttrsToList (hostname: v: { inherit hostname; } // filterConfig (filterConfig v)) ingressSets
+          ++ mapAttrsToList (hostname: service: { inherit hostname service; }) ingressStrs
+          ++ [ { service = tunnel.default; } ];
+      })
+    );
 
-  # Start script that reads the tunnel token from systemd's credentials
-  # directory and passes it via --token.
   startScript = pkgs.replaceVars ../scripts/start-tunnel.sh {
     inherit bash;
     cloudflared_package = config.services.cloudflared.package;
     config_file = tunnelConfig;
   };
+
+  # API credentials, by credential name.
+  apiCredentials = {
+    account-id = cfg.accountIdFile;
+  }
+  // (
+    if cfg.apiTokenFile != null then
+      { api-token = cfg.apiTokenFile; }
+    else
+      {
+        api-key = cfg.apiKeyFile;
+        email = cfg.emailFile;
+      }
+  );
+
+  hardening = {
+    PrivateTmp = true;
+    ProtectHome = true;
+    ProtectSystem = "strict";
+    NoNewPrivileges = true;
+    ProtectKernelLogs = true;
+    ProtectKernelModules = true;
+    ProtectKernelTunables = true;
+    ProtectControlGroups = true;
+    RestrictNamespaces = true;
+    RestrictRealtime = true;
+    SystemCallArchitectures = "native";
+    UMask = "0077";
+    LoadCredential = mapAttrsToList (n: p: "${n}:${p}") apiCredentials;
+  };
 in
 {
-  imports = [ ./options.nix ];
+  imports = [
+    ./options.nix
+    (mkRemovedOptionModule [ "cfg" "cloudflared" ] ''
+      nixos-cloudflared's options moved to services.cloudflared-tunnel, and
+      its credentials are now runtime paths instead of agenix files: declare
+      the age (or sops, …) secrets yourself and pass their paths, e.g.
 
-  config = mkIf cfg.enable (mkMerge [
-    {
-      assertions = [
-        {
-          assertion = hasAgenix;
-          message = ''
-            cfg.cloudflared requires the agenix module to be imported.
-            Add agenix to your flake inputs and import agenix.nixosModules.default
-            in your system configuration.
-          '';
-        }
+        services.cloudflared-tunnel = {
+          enable = true;
+          name = "<the old tunnelName>";       # defaults to networking.hostName
+          stateDir = "<the old homeDir>";      # defaults to /var/lib/cloudflared
+          accountIdFile = config.age.secrets.cf-account-id.path;
+          apiKeyFile = config.age.secrets.cf-api-key.path;
+          emailFile = config.age.secrets.cf-email.path;
+          # or, preferred: apiTokenFile = …; (see its description)
+        };
+    '')
+  ];
+
+  config = mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = (cfg.apiTokenFile != null) != (cfg.apiKeyFile != null || cfg.emailFile != null);
+        message = "services.cloudflared-tunnel: set apiTokenFile, or apiKeyFile and emailFile — exactly one way to authenticate.";
+      }
+      {
+        assertion = cfg.apiTokenFile != null || (cfg.apiKeyFile != null && cfg.emailFile != null);
+        message = "services.cloudflared-tunnel: apiKeyFile needs emailFile (and the other way around).";
+      }
+    ];
+
+    systemd.tmpfiles.rules = [ "d ${stateDir} 0700 root root -" ];
+
+    systemd.services."cloudflared-tunnel-setup-${name}" = {
+      description = "Find or create Cloudflare tunnel ${name}";
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "network-online.target" ];
+      after = [ "network-online.target" ];
+      serviceConfig = hardening // {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${bash} ${setupScript}";
+        ReadWritePaths = [ stateDir ];
+      };
+    };
+
+    systemd.services."cloudflared-update-dns-${name}" = mkIf cfg.dns.enable {
+      description = "DNS records for the ingress hostnames of Cloudflare tunnel ${name}";
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "network-online.target" ];
+      requires = [ "cloudflared-tunnel-setup-${name}.service" ];
+      after = [
+        "network-online.target"
+        "cloudflared-tunnel-setup-${name}.service"
       ];
-    }
-
-    {
-      age.secrets = {
-        cf_account_id.file = accountIdAgePath;
-        cf_account_email.file = emailAgePath;
-        cf_account_api.file = apiAgePath;
+      serviceConfig = hardening // {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${bash} ${dnsScript}";
+        ReadOnlyPaths = [ stateDir ];
       };
-    }
+    };
 
-    # ── Tunnel setup ───────────────────────────────────────────────────────────
-    # Fetches or creates the tunnel via the Cloudflare API at boot.
-    # Writes .<tunnelName>.token (JWT for --token) and .<tunnelName>.json
-    # (credentials for inspection) to homeDir with umask 077.
-    {
-      systemd.services."cloudflared-tunnel-setup-${tunnelName}" = {
-        description = "Create or update Cloudflare tunnel ${tunnelName}";
-        wantedBy = [ "multi-user.target" ];
-        after = [ "network-online.target" ];
-        requires = [ "network-online.target" ];
-        script = ''
-          ${bash} ${createCloudflaredHome}
-          ${bash} ${fetchOrCreateTunnel}
-        '';
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-          PrivateTmp = true;
-          ProtectHome = true;
-          ProtectSystem = "strict";
-          ReadWritePaths = [ homeDir ];
-          NoNewPrivileges = true;
-          ProtectKernelLogs = true;
-          ProtectKernelModules = true;
-          ProtectKernelTunables = true;
-          ProtectControlGroups = true;
-          RestrictNamespaces = true;
-          RestrictRealtime = true;
-          SystemCallArchitectures = "native";
-        };
+    # nixpkgs' daemon unit, started with the token from the setup unit.
+    systemd.services."cloudflared-tunnel-${name}" = {
+      after = [ "cloudflared-tunnel-setup-${name}.service" ];
+      requires = [ "cloudflared-tunnel-setup-${name}.service" ];
+      serviceConfig = {
+        LoadCredential = mkForce [ "tunnel-token:${stateDir}/.${name}.token" ];
+        ExecStart = mkForce "${bash} ${startScript}";
       };
-    }
+    };
 
-    # ── DNS update ──────────────────────────────────────────────────────────────
-    # Creates or updates CNAME records for all ingress domains.
-    {
-      systemd.services."cloudflared-update-dns-${tunnelName}" = {
-        description = "Update DNS records for cloudflare tunnel ${tunnelName} domains";
-        wantedBy = [ "multi-user.target" ];
-        after = [
-          "network-online.target"
-          "cloudflared-tunnel-${tunnelName}.service"
-        ];
-        requires = [ "network-online.target" ];
-        script = ''
-          ${bash} ${cloudflareUpdateDNSScript}
-        '';
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-          PrivateTmp = true;
-          ProtectHome = true;
-          ProtectSystem = "strict";
-          NoNewPrivileges = true;
-          ProtectKernelLogs = true;
-          ProtectKernelModules = true;
-          ProtectKernelTunables = true;
-          ProtectControlGroups = true;
-          RestrictNamespaces = true;
-          RestrictRealtime = true;
-          SystemCallArchitectures = "native";
-        };
+    services.cloudflared = {
+      enable = true;
+      tunnels.${name} = {
+        credentialsFile = "${stateDir}/.${name}.json";
+        default = mkDefault "http_status:404";
       };
-    }
-
-    # ── Tunnel service ──────────────────────────────────────────────────────────
-    # Authenticates via --token with the JWT fetched by the setup service.
-    # The token is loaded through LoadCredential so it's available to the
-    # DynamicUser without direct file access.
-    {
-      systemd.services."cloudflared-tunnel-${tunnelName}" = {
-        after = [ "cloudflared-tunnel-setup-${tunnelName}.service" ];
-        requires = [ "cloudflared-tunnel-setup-${tunnelName}.service" ];
-        serviceConfig = {
-          LoadCredential = mkForce [ "tunnel-token:${homeDir}/.${tunnelName}.token" ];
-          ExecStart = mkForce "${bash} ${startScript}";
-        };
-      };
-    }
-
-    # ── Upstream cloudflared options ────────────────────────────────────────────
-    # Enables the upstream module for its tunnel/ingress options.  The tunnel
-    # service's ExecStart and LoadCredential are overridden above.
-    {
-      services.cloudflared = {
-        enable = true;
-        tunnels.${tunnelName} = {
-          credentialsFile = "${homeDir}/.${tunnelName}.json";
-          default = "http_status:404";
-        };
-      };
-    }
-  ]);
+    };
+  };
 }
