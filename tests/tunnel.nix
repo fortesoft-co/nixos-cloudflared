@@ -145,6 +145,18 @@ pkgs.testers.runNixOSTest {
         machine.fail("ps -eo args | grep -F test-api-token-xyz | grep -v grep")
         machine.fail("journalctl -b --no-pager | grep -F test-api-token-xyz")
 
+    with subtest("an API failure leaves the setup unit failed but the tunnel up"):
+        # A token without the needed permission: the API answers 403.
+        machine.succeed("echo wrong-token > /run/test-secrets/api-token")
+        machine.fail("systemctl restart cloudflared-tunnel-setup-gateway.service")
+        assert machine.succeed("systemctl is-failed cloudflared-tunnel-setup-gateway.service || true").strip() == "failed"
+        # The daemon starts from the stored token instead of failing on its
+        # dependency, and the stored token is untouched.
+        machine.succeed("systemctl restart cloudflared-tunnel-gateway.service")
+        assert machine.succeed("cat /var/lib/cloudflared/.gateway.token") == "tunnel-token-secret"
+        machine.succeed("echo test-api-token-xyz > /run/test-secrets/api-token")
+        machine.succeed("systemctl restart cloudflared-tunnel-setup-gateway.service")
+
     with subtest("the daemon is started with the token as a credential"):
         unit = machine.succeed("systemctl cat cloudflared-tunnel-gateway.service")
         assert "LoadCredential=tunnel-token:/var/lib/cloudflared/.gateway.token" in unit, unit

@@ -21,6 +21,13 @@ Three units per tunnel:
    `app.example.co.uk` and delegated sub-zones land in the right place.
    Existing CNAMEs with those names are updated in place.
 
+**The tunnel survives a failed setup.** The daemon and the DNS unit only need
+what the last successful setup stored. If the API fails at boot (an outage, a
+token missing a permission, no network yet), the setup unit fails, so you see
+it in `systemctl --failed`, but the tunnel starts with the stored token. The
+setup unit gives up after two minutes rather than holding the daemon back. Only
+the very first setup on a host has to succeed.
+
 Ingress uses nixpkgs' own options, so any module can add a hostname:
 
 ```nix
@@ -109,7 +116,9 @@ nix flake check
 - every hostname gets a proxied CNAME in its own zone, including a
   multi-label suffix;
 - the API token appears only as a request header, never in the process table
-  or the journal.
+  or the journal;
+- when the API refuses the token, the setup unit fails but the tunnel still
+  starts from the stored token.
 
 ## Used by
 

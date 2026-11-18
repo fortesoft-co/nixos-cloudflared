@@ -7,6 +7,12 @@
 #                                    authenticating with that token
 #   cloudflared-update-dns-<name>    a proxied CNAME per ingress hostname
 #
+# The token outlives a failed setup: the daemon and the DNS unit only need
+# the files the last successful setup left in stateDir, so an API problem at
+# boot (an outage, a missing permission, no network yet) leaves the setup
+# unit failed, visibly, but the tunnel up. Only the very first setup has to
+# succeed.
+#
 # Ingress entries come from nixpkgs' options: any module can add
 # services.cloudflared.tunnels.<name>.ingress."<hostname>".
 #
@@ -136,18 +142,24 @@ in
         RemainAfterExit = true;
         ExecStart = "${bash} ${setupScript}";
         ReadWritePaths = [ stateDir ];
+        # Don't hold the daemon back for long: it can start from the stored
+        # token, and it retries its own connection.
+        TimeoutStartSec = "2min";
       };
     };
 
     systemd.services."cloudflared-update-dns-${name}" = mkIf cfg.dns.enable {
       description = "DNS records for the ingress hostnames of Cloudflare tunnel ${name}";
       wantedBy = [ "multi-user.target" ];
-      wants = [ "network-online.target" ];
-      requires = [ "cloudflared-tunnel-setup-${name}.service" ];
+      wants = [
+        "network-online.target"
+        "cloudflared-tunnel-setup-${name}.service"
+      ];
       after = [
         "network-online.target"
         "cloudflared-tunnel-setup-${name}.service"
       ];
+      unitConfig.ConditionPathExists = "${stateDir}/.${name}.json";
       serviceConfig = hardening // {
         Type = "oneshot";
         RemainAfterExit = true;
@@ -156,10 +168,12 @@ in
       };
     };
 
-    # nixpkgs' daemon unit, started with the token from the setup unit.
+    # nixpkgs' daemon unit, started with the token the setup unit stored —
+    # fresh when setup succeeded, the previous one when it didn't.
     systemd.services."cloudflared-tunnel-${name}" = {
+      wants = [ "cloudflared-tunnel-setup-${name}.service" ];
       after = [ "cloudflared-tunnel-setup-${name}.service" ];
-      requires = [ "cloudflared-tunnel-setup-${name}.service" ];
+      unitConfig.ConditionPathExists = "${stateDir}/.${name}.token";
       serviceConfig = {
         LoadCredential = mkForce [ "tunnel-token:${stateDir}/.${name}.token" ];
         ExecStart = mkForce "${bash} ${startScript}";
