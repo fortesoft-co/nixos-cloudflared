@@ -96,29 +96,6 @@ All options live under `services.cloudflared-tunnel`.
 | `dns.enable` | `true` | Manage the CNAME records. |
 | `apiUrl` | Cloudflare's | API base URL, for tests or a proxy. |
 
-## Migrating from `cfg.cloudflared`
-
-The options moved to `services.cloudflared-tunnel`, and the `*AgePath` options
-are gone. Declare the secrets yourself and pass their runtime paths:
-
-```nix
-age.secrets.cf-account-id.file = ./secrets/cf_account_id.age;
-age.secrets.cf-api-key.file = ./secrets/cf_account_api.age;
-age.secrets.cf-email.file = ./secrets/cf_account_email.age;
-
-services.cloudflared-tunnel = {
-  enable = true;
-  name = "my-tunnel";               # was tunnelName; defaults to the host name
-  stateDir = "/var/lib/cloudflared"; # was homeDir
-  accountIdFile = config.age.secrets.cf-account-id.path;
-  apiKeyFile = config.age.secrets.cf-api-key.path;
-  emailFile = config.age.secrets.cf-email.path;
-};
-```
-
-Setting any old `cfg.cloudflared` option fails evaluation with these
-instructions.
-
 ## Tests
 
 ```sh

@@ -110,24 +110,7 @@ let
   };
 in
 {
-  imports = [
-    ./options.nix
-    (mkRemovedOptionModule [ "cfg" "cloudflared" ] ''
-      nixos-cloudflared's options moved to services.cloudflared-tunnel, and
-      its credentials are now runtime paths instead of agenix files: declare
-      the age (or sops, …) secrets yourself and pass their paths, e.g.
-
-        services.cloudflared-tunnel = {
-          enable = true;
-          name = "<the old tunnelName>";       # defaults to networking.hostName
-          stateDir = "<the old homeDir>";      # defaults to /var/lib/cloudflared
-          accountIdFile = config.age.secrets.cf-account-id.path;
-          apiKeyFile = config.age.secrets.cf-api-key.path;
-          emailFile = config.age.secrets.cf-email.path;
-          # or, preferred: apiTokenFile = …; (see its description)
-        };
-    '')
-  ];
+  imports = [ ./options.nix ];
 
   config = mkIf cfg.enable {
     assertions = [
